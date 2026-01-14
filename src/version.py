@@ -4,7 +4,7 @@ import sys
 import httpx
 
 BUILD_DATE = None
-BUILD_VERSION = None
+BUILD_COMMIT = None
 BUILD_REPO = None
 
 
@@ -28,28 +28,26 @@ def get_sha256() -> str:
 def check_for_updates() -> dict:
     if not BUILD_REPO:
         return {"available": False, "error": "No repository configured"}
-    
+
     try:
         with httpx.Client(timeout=10.0) as client:
             response = client.get(
-                f"https://api.github.com/repos/{BUILD_REPO}/releases/latest",
+                f"https://api.github.com/repos/{BUILD_REPO}/commits/HEAD",
                 headers={"Accept": "application/vnd.github.v3+json"}
             )
-            if response.status_code == 404:
-                return {"available": False, "error": "No releases found"}
-            response.raise_for_status()
+            if response.status_code != 200:
+                return {"available": False, "error": "Could not fetch latest commit"}
             data = response.json()
-            latest = data.get("tag_name", "").lstrip("v")
-            current = (BUILD_VERSION or "").lstrip("v")
-            
-            if latest and current and latest != current:
+            latest = data.get("sha", "")[:7]
+
+            if latest and BUILD_COMMIT and latest != BUILD_COMMIT:
                 return {
                     "available": True,
-                    "current": current,
+                    "current": BUILD_COMMIT,
                     "latest": latest,
-                    "url": data.get("html_url", "")
+                    "url": f"https://github.com/{BUILD_REPO}/releases/tag/latest"
                 }
-            return {"available": False, "current": current, "latest": latest}
+            return {"available": False, "current": BUILD_COMMIT, "latest": latest}
     except Exception as e:
         return {"available": False, "error": str(e)}
 
@@ -57,18 +55,20 @@ def check_for_updates() -> dict:
 def print_version_info():
     print("aitgbot")
     print("-" * 40)
-    
-    if BUILD_VERSION:
-        print(f"Version:    {BUILD_VERSION}")
-    
+
+    if BUILD_COMMIT:
+        print(f"Commit:     {BUILD_COMMIT}")
+    else:
+        print("Commit:     dev (local build)")
+
     if BUILD_DATE:
         print(f"Built:      {BUILD_DATE}")
-    
+
     if BUILD_REPO:
         print(f"Repository: https://github.com/{BUILD_REPO}")
-    
+
     print(f"SHA256:     {get_sha256()}")
-    
+
     if BUILD_REPO:
         print("\nChecking for updates...")
         update = check_for_updates()
