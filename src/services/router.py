@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Type
 
 from .base import AIProvider, Message, ChatResponse, Model
 from .lm_studio import LMStudioProvider
+from .ollama import OllamaProvider
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +24,7 @@ logger = logging.getLogger(__name__)
 
 PROVIDERS: Dict[str, Type[AIProvider]] = {
     "lm_studio": LMStudioProvider,
-    # Add more providers here:
-    # "openai": OpenAIProvider,
-    # "anthropic": AnthropicProvider,
-    # "ollama": OllamaProvider,
+    "ollama": OllamaProvider,
 }
 
 # Default provider if none specified
