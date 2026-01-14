@@ -18,7 +18,8 @@ def run_web():
     src_dir = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, src_dir)
     os.chdir(paths.get_base_path())
-    uvicorn.run("web:app", host="0.0.0.0", port=7860, reload=False)
+    from web import app
+    uvicorn.run(app, host="0.0.0.0", port=7860, reload=False)
 
 
 def run_bot():

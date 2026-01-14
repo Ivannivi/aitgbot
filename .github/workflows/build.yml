@@ -137,8 +137,9 @@ jobs:
         run: |
           mkdir -p release
           cp dist/${{ matrix.executable }} release/
-          cp .env.example release/
-          cp project.url release/
+          if [ -f .env.example ]; then cp .env.example release/; fi
+          if [ -f project.url ]; then cp project.url release/; fi
+          ls -la release/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -153,6 +154,9 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
