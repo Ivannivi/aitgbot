@@ -31,6 +31,12 @@ def run_bot():
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+
+    if len(sys.argv) > 1 and sys.argv[1] in ('-v', '--version'):
+        from version import print_version_info
+        print_version_info()
+        sys.exit(0)
+
     os.chdir(paths.get_base_path())
 
     web_process = multiprocessing.Process(target=run_web, name="WebUI")
