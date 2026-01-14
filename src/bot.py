@@ -9,9 +9,11 @@ from dotenv import load_dotenv
 
 import db
 import paths
+import env_check
 from services import get_router
 from services.base import Message
 
+env_check.ensure_env_exists()
 load_dotenv(paths.get_data_path('.env'))
 
 logger = logging.getLogger(__name__)
