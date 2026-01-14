@@ -5,9 +5,10 @@ import base64
 import io
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
-from openai import AsyncOpenAI
 from dotenv import load_dotenv
 import db
+from services import get_router
+from services.base import Message
 
 # Load .env from project root (parent of src directory)
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'))
@@ -117,13 +118,15 @@ async def list_models(message: types.Message):
     if not message.from_user or not db.is_user_admin(message.from_user.id):
         return
     
+    router = get_router()
     lm_studio_url = db.get_config('lm_studio_url', 'http://127.0.0.1:1234/v1')
-    client = AsyncOpenAI(base_url=lm_studio_url, api_key="lm-studio")
+    router.configure_provider('lm_studio', base_url=lm_studio_url)
+    
     try:
-        models_list = await client.models.list()
-        text = "Available Models:\n"
+        models_list = await router.list_models()
+        text = f"Available Models ({router.get_current_provider()}):\n"
         current = db.get_config('model')
-        for m in models_list.data:
+        for m in models_list:
             mark = " [CURRENT]" if m.id == current else ""
             text += f"- `{m.id}`{mark}\n"
         await message.answer(text, parse_mode="Markdown")
@@ -189,21 +192,22 @@ async def chat_handler(message: types.Message):
         await message.answer("You are now an admin.")
         return
 
-    # User is authorized, send to LM Studio
+    # User is authorized, send to AI provider
     model_name = db.get_config('model', 'local-model')
     system_prompt = db.get_config('system_prompt', 'You are a helpful assistant.')
     lm_studio_url = db.get_config('lm_studio_url', 'http://127.0.0.1:1234/v1')
 
-    # Initialize OpenAI client for LM Studio (using dynamic URL)
-    client = AsyncOpenAI(base_url=lm_studio_url, api_key="lm-studio")
+    # Get the AI router and configure the provider
+    router = get_router()
+    router.configure_provider('lm_studio', base_url=lm_studio_url)
     
     # Notify user that we are thinking (optional, but good UX)
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
     try:
-        logging.info(f"Sending request to LM Studio ({lm_studio_url}) with model {model_name}...")
+        logging.info(f"Sending request via AI router with model {model_name}...")
         
-        messages = [{"role": "system", "content": str(system_prompt)}]
+        messages = [Message(role="system", content=str(system_prompt))]
         
         if message.photo:
             # Get the largest photo
@@ -227,23 +231,20 @@ async def chat_handler(message: types.Message):
                     }
                 }
             ]
-            messages.append({"role": "user", "content": user_content})
+            messages.append(Message(role="user", content=user_content))
         else:
-            messages.append({"role": "user", "content": str(text)})
+            messages.append(Message(role="user", content=str(text)))
 
-        completion = await client.chat.completions.create(
-            model=model_name,
-            messages=messages
-        )
-        logging.info("Received response from LM Studio")
-        response_text = completion.choices[0].message.content
-        if response_text:
-            await message.answer(response_text)
+        response = await router.chat(messages, model=model_name)
+        logging.info(f"Received response from {response.provider}")
+        
+        if response.text:
+            await message.answer(response.text)
         else:
-            await message.answer("LM Studio returned an empty response.")
+            await message.answer("AI returned an empty response.")
     except Exception as e:
-        logging.error(f"LM Studio Error: {e}")
-        await message.answer(f"Error communicating with LM Studio. Is it running on port 1234?\nError: {e}")
+        logging.error(f"AI Provider Error: {e}")
+        await message.answer(f"Error communicating with AI provider. Is it running?\nError: {e}")
 
 async def main():
     logging.info("Starting bot polling...")
