@@ -88,7 +88,3 @@ To use image recognition:
 - **Bot not responding?** Check the console logs. Ensure `BOT_TOKEN` is correct.
 - **LLM Error?** Ensure LM Studio is running and the Server is started (default port 1234).
 - **Images not working?** Ensure the loaded model supports vision.
-
-## License
-
-[Your License Here]
