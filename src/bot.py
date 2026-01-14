@@ -3,32 +3,29 @@ import logging
 import os
 import base64
 import io
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
-from openai import AsyncOpenAI
-from dotenv import load_dotenv
+
 import db
+import paths
+from services import get_router
+from services.base import Message
 
-load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
+logger = logging.getLogger(__name__)
 
-TOKEN = os.getenv("BOT_TOKEN", "").strip()
+# Get config from database
+TOKEN = db.get_config('bot_token', '')
 if not TOKEN:
-    raise ValueError("BOT_TOKEN is not set in .env file")
+    raise ValueError("BOT_TOKEN not configured. Please set it in the web UI at http://localhost:7860")
 
-print(f"Loaded Token: {TOKEN[:5]}...{TOKEN[-5:]} (Check if this matches your BotFather token)")
+WEBUI_PASSWORD = db.get_config('webui_password', 'admin')
 
-# Initialize Bot and Dispatcher
 dp = Dispatcher()
 bot = Bot(token=TOKEN)
 
-WEBUI_PASSWORD = os.getenv("WEBUI_PASSWORD", "admin")
 
 def get_access_password():
-    # Priority: DB -> Env -> Default
-    pwd = db.get_config('access_password')
-    if pwd:
-        return pwd
-    return os.getenv('BOT_ACCESS_PASSWORD', 'secret')
+    return db.get_config('access_password', 'secret')
 
 @dp.message(CommandStart())
 async def command_start_handler(message: types.Message):
@@ -116,13 +113,22 @@ async def list_models(message: types.Message):
     if not message.from_user or not db.is_user_admin(message.from_user.id):
         return
     
+    router = get_router()
+    current_provider = db.get_config('ai_provider', 'lm_studio')
+    router.set_current_provider(current_provider)
+    
+    # Configure providers based on saved settings
     lm_studio_url = db.get_config('lm_studio_url', 'http://127.0.0.1:1234/v1')
-    client = AsyncOpenAI(base_url=lm_studio_url, api_key="lm-studio")
+    ollama_url = db.get_config('ollama_url', 'http://127.0.0.1:11434')
+    
+    router.configure_provider('lm_studio', base_url=lm_studio_url)
+    router.configure_provider('ollama', base_url=ollama_url)
+    
     try:
-        models_list = await client.models.list()
-        text = "Available Models:\n"
+        models_list = await router.list_models()
+        text = f"Available Models ({current_provider.replace('_', ' ').title()}):\n"
         current = db.get_config('model')
-        for m in models_list.data:
+        for m in models_list:
             mark = " [CURRENT]" if m.id == current else ""
             text += f"- `{m.id}`{mark}\n"
         await message.answer(text, parse_mode="Markdown")
@@ -188,65 +194,49 @@ async def chat_handler(message: types.Message):
         await message.answer("You are now an admin.")
         return
 
-    # User is authorized, send to LM Studio
     model_name = db.get_config('model', 'local-model')
     system_prompt = db.get_config('system_prompt', 'You are a helpful assistant.')
+    current_provider = db.get_config('ai_provider', 'lm_studio')
+    
+    router = get_router()
+    router.set_current_provider(current_provider)
+    
+    # Configure providers based on saved settings
     lm_studio_url = db.get_config('lm_studio_url', 'http://127.0.0.1:1234/v1')
+    ollama_url = db.get_config('ollama_url', 'http://127.0.0.1:11434')
+    
+    router.configure_provider('lm_studio', base_url=lm_studio_url)
+    router.configure_provider('ollama', base_url=ollama_url)
 
-    # Initialize OpenAI client for LM Studio (using dynamic URL)
-    client = AsyncOpenAI(base_url=lm_studio_url, api_key="lm-studio")
-    
-    # Notify user that we are thinking (optional, but good UX)
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    
+
     try:
-        logging.info(f"Sending request to LM Studio ({lm_studio_url}) with model {model_name}...")
-        
-        messages = [{"role": "system", "content": str(system_prompt)}]
-        
+        messages = [Message(role="system", content=str(system_prompt))]
+
         if message.photo:
-            # Get the largest photo
             photo = message.photo[-1]
-            logging.info(f"Processing image: {photo.file_id}")
-            
-            # Download photo to memory
             file_io = io.BytesIO()
             await bot.download(photo, destination=file_io)
             file_io.seek(0)
-            
-            # Encode to base64
             base64_image = base64.b64encode(file_io.getvalue()).decode('utf-8')
-            
             user_content = [
-                {"type": "text", "text": str(text) if text else "What is in this image?"},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_image}"
-                    }
-                }
+                {"type": "text", "text": text or "What is in this image?"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
             ]
-            messages.append({"role": "user", "content": user_content})
+            messages.append(Message(role="user", content=user_content))
         else:
-            messages.append({"role": "user", "content": str(text)})
+            messages.append(Message(role="user", content=text))
 
-        completion = await client.chat.completions.create(
-            model=model_name,
-            messages=messages
-        )
-        logging.info("Received response from LM Studio")
-        response_text = completion.choices[0].message.content
-        if response_text:
-            await message.answer(response_text)
-        else:
-            await message.answer("LM Studio returned an empty response.")
+        response = await router.chat(messages, model=model_name)
+        await message.answer(response.text or "Empty response from AI.")
     except Exception as e:
-        logging.error(f"LM Studio Error: {e}")
-        await message.answer(f"Error communicating with LM Studio. Is it running on port 1234?\nError: {e}")
+        logger.exception("AI request failed")
+        await message.answer(f"Error: {e}")
 
 async def main():
-    logging.info("Starting bot polling...")
+    logger.info("Starting bot...")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

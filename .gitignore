@@ -5,3 +5,4 @@ __pycache__/
 bot.db
 venv/
 .vscode/
+src/__pycache__/

@@ -1,0 +1,225 @@
+name: Build Executables
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: aitgbot-linux
+            executable: aitgbot
+          - os: windows-latest
+            artifact: aitgbot-windows
+            executable: aitgbot.exe
+          - os: macos-latest
+            artifact: aitgbot-macos
+            executable: aitgbot
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Inject build info
+        shell: bash
+        run: |
+          COMMIT_SHA="${{ github.sha }}"
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          REPO="${{ github.repository }}"
+          
+          cat > src/version.py << EOF
+          import hashlib
+          import os
+          import sys
+          import httpx
+
+          BUILD_DATE = "$BUILD_DATE"
+          BUILD_COMMIT = "$SHORT_SHA"
+          BUILD_REPO = "$REPO"
+
+
+          def get_executable_path() -> str:
+              if getattr(sys, 'frozen', False):
+                  return sys.executable
+              return os.path.abspath(__file__)
+
+
+          def get_sha256() -> str:
+              exe_path = get_executable_path()
+              if not os.path.exists(exe_path):
+                  return "unknown"
+              sha256 = hashlib.sha256()
+              with open(exe_path, 'rb') as f:
+                  for chunk in iter(lambda: f.read(8192), b''):
+                      sha256.update(chunk)
+              return sha256.hexdigest()
+
+
+          def check_for_updates() -> dict:
+              if not BUILD_REPO:
+                  return {"available": False, "error": "No repository configured"}
+              
+              try:
+                  with httpx.Client(timeout=10.0) as client:
+                      response = client.get(
+                          f"https://api.github.com/repos/{BUILD_REPO}/commits/HEAD",
+                          headers={"Accept": "application/vnd.github.v3+json"}
+                      )
+                      if response.status_code != 200:
+                          return {"available": False, "error": "Could not fetch latest commit"}
+                      data = response.json()
+                      latest = data.get("sha", "")[:7]
+                      
+                      if latest and BUILD_COMMIT and latest != BUILD_COMMIT:
+                          return {
+                              "available": True,
+                              "current": BUILD_COMMIT,
+                              "latest": latest,
+                              "url": f"https://github.com/{BUILD_REPO}/releases/tag/latest"
+                          }
+                      return {"available": False, "current": BUILD_COMMIT, "latest": latest}
+              except Exception as e:
+                  return {"available": False, "error": str(e)}
+
+
+          def print_version_info():
+              print("aitgbot")
+              print("-" * 40)
+              
+              if BUILD_COMMIT:
+                  print(f"Commit:     {BUILD_COMMIT}")
+              
+              if BUILD_DATE:
+                  print(f"Built:      {BUILD_DATE}")
+              
+              if BUILD_REPO:
+                  print(f"Repository: https://github.com/{BUILD_REPO}")
+              
+              print(f"SHA256:     {get_sha256()}")
+              
+              if BUILD_REPO:
+                  print("\nChecking for updates...")
+                  update = check_for_updates()
+                  if update.get("error"):
+                      print(f"  Could not check: {update['error']}")
+                  elif update.get("available"):
+                      print(f"  Update available: {update['current']} -> {update['latest']}")
+                      print(f"  Download: {update['url']}")
+                  else:
+                      print("  You are running the latest version.")
+          EOF
+
+      - name: Build executable
+        run: pyinstaller aitgbot.spec --clean
+
+      - name: Prepare release files
+        shell: bash
+        run: |
+          mkdir -p release
+          cp dist/${{ matrix.executable }} release/
+          cp project.url release/
+          ls -la release/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: release/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create archives
+        run: |
+          cd artifacts
+          for dir in */; do
+            name="${dir%/}"
+            cd "$name"
+            chmod +x * 2>/dev/null || true
+            if [[ "$name" == *"windows"* ]]; then
+              zip -r "../${name}.zip" .
+            else
+              tar -czvf "../${name}.tar.gz" .
+            fi
+            cd ..
+          done
+
+      - name: Delete existing latest release
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate checksums and release info
+        id: release_info
+        run: |
+          BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          BUILD_DATE_SHORT=$(date -u +"%Y-%m-%d")
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          echo "build_date_short=$BUILD_DATE_SHORT" >> $GITHUB_OUTPUT
+          
+          cd artifacts
+          echo "## SHA256 Checksums" > checksums.txt
+          echo '```' >> checksums.txt
+          sha256sum *.zip *.tar.gz >> checksums.txt
+          echo '```' >> checksums.txt
+          
+          cat checksums.txt
+          
+          {
+            echo 'checksums<<EOF'
+            cat checksums.txt
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
+      - name: Create Rolling Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Build ${{ steps.release_info.outputs.build_date_short }}
+          body: |
+            Rolling release - automatically updated on every push to main branch.
+            
+            **Commit:** ${{ github.sha }}
+            **Built:** ${{ steps.release_info.outputs.build_date }}
+            
+            ${{ steps.release_info.outputs.checksums }}
+          files: |
+            artifacts/*.zip
+            artifacts/*.tar.gz
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

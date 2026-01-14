@@ -17,6 +17,7 @@ A powerful Telegram bot interface for LM Studio (or compatible OpenAI API endpoi
 
 - **Python 3.8+**
 - **LM Studio** (running locally on port 1234, or another OpenAI-compatible API)
+- **OLLAMA**
 - **Telegram Bot Token** (from @BotFather)
 
 ## Installation
