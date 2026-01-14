@@ -1,223 +1,278 @@
 import sqlite3
 import os
 import secrets
+import json
+import logging
+from datetime import datetime, timedelta
 
 # Store database in project root (parent of src directory)
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'bot.db')
+
+logger = logging.getLogger(__name__)
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
+# ============================================================================
+# SCHEMALESS DATABASE
+# ============================================================================
+# All data is stored as JSON documents in a single 'documents' table.
+# Each document has a collection name (like 'users', 'config', 'invites')
+# and a unique key within that collection.
+# No migrations needed - just add new fields to documents as needed.
+# ============================================================================
+
 def init_db():
+    """Initialize the schemaless document store"""
     conn = get_connection()
     c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            authorized_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    try:
-        c.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        c.execute("ALTER TABLE users ADD COLUMN is_super_admin INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
     
+    # Single table for all documents
     c.execute('''
-        CREATE TABLE IF NOT EXISTS config (
-            key TEXT PRIMARY KEY,
-            value TEXT
+        CREATE TABLE IF NOT EXISTS documents (
+            collection TEXT NOT NULL,
+            doc_key TEXT NOT NULL,
+            data TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (collection, doc_key)
         )
     ''')
-
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS invites (
-            code TEXT PRIMARY KEY,
-            is_admin_invite INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    try:
-        c.execute("ALTER TABLE invites ADD COLUMN is_admin_invite INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
     
-    # Set default values if not exists
-    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('model', 'local-model')")
-    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('system_prompt', 'You are a helpful assistant.')")
-    # Use 127.0.0.1 instead of localhost to avoid IPv6 issues
-    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('lm_studio_url', 'http://127.0.0.1:1234/v1')")
+    # Index for faster collection queries
+    c.execute('CREATE INDEX IF NOT EXISTS idx_collection ON documents(collection)')
     
     conn.commit()
     conn.close()
+    
+    # Set default config values if not exist
+    if get_doc('config', 'model') is None:
+        set_doc('config', 'model', {'value': 'local-model'})
+    if get_doc('config', 'system_prompt') is None:
+        set_doc('config', 'system_prompt', {'value': 'You are a helpful assistant.'})
+    if get_doc('config', 'lm_studio_url') is None:
+        set_doc('config', 'lm_studio_url', {'value': 'http://127.0.0.1:1234/v1'})
+
+
+# ============================================================================
+# CORE DOCUMENT OPERATIONS
+# ============================================================================
+
+def set_doc(collection, key, data):
+    """Store a document in a collection"""
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        c.execute('''
+            INSERT OR REPLACE INTO documents (collection, doc_key, data, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ''', (collection, str(key), json.dumps(data)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_doc(collection, key):
+    """Retrieve a document from a collection"""
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        c.execute(
+            'SELECT data FROM documents WHERE collection = ? AND doc_key = ?',
+            (collection, str(key))
+        )
+        row = c.fetchone()
+        return json.loads(row['data']) if row else None
+    finally:
+        conn.close()
+
+
+def delete_doc(collection, key):
+    """Delete a document from a collection"""
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        c.execute(
+            'DELETE FROM documents WHERE collection = ? AND doc_key = ?',
+            (collection, str(key))
+        )
+        conn.commit()
+        return c.rowcount > 0
+    finally:
+        conn.close()
+
+
+def get_all_docs(collection):
+    """Get all documents in a collection"""
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        c.execute(
+            'SELECT doc_key, data, created_at FROM documents WHERE collection = ?',
+            (collection,)
+        )
+        return [
+            {'key': row['doc_key'], 'created_at': row['created_at'], **json.loads(row['data'])}
+            for row in c.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def update_doc(collection, key, updates):
+    """Update specific fields in a document (merges with existing data)"""
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        c.execute(
+            'SELECT data FROM documents WHERE collection = ? AND doc_key = ?',
+            (collection, str(key))
+        )
+        row = c.fetchone()
+        if row:
+            data = json.loads(row['data'])
+            data.update(updates)
+            c.execute('''
+                UPDATE documents SET data = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE collection = ? AND doc_key = ?
+            ''', (json.dumps(data), collection, str(key)))
+            conn.commit()
+            return True
+        return False
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# USER FUNCTIONS
+# ============================================================================
 
 def add_user(user_id, username, is_admin=False, is_super_admin=False):
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        # Maintain existing flags if updating
-        c.execute("SELECT is_admin, is_super_admin FROM users WHERE user_id = ?", (user_id,))
-        row = c.fetchone()
-        
-        final_is_admin = 1 if is_admin else (row['is_admin'] if row else 0)
-        final_is_super = 1 if is_super_admin else (row['is_super_admin'] if row else 0)
-        
-        c.execute("INSERT OR REPLACE INTO users (user_id, username, is_admin, is_super_admin) VALUES (?, ?, ?, ?)", 
-                  (user_id, username, final_is_admin, final_is_super))
-        conn.commit()
-    finally:
-        conn.close()
+    existing = get_doc('users', user_id)
+    
+    data = {
+        'user_id': user_id,
+        'username': username,
+        'is_admin': is_admin or (existing.get('is_admin', False) if existing else False),
+        'is_super_admin': is_super_admin or (existing.get('is_super_admin', False) if existing else False),
+    }
+    
+    set_doc('users', user_id, data)
+
 
 def make_admin(user_id, is_admin=True):
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        # Prevent demoting super admin
-        if not is_admin:
-            c.execute("SELECT is_super_admin FROM users WHERE user_id = ?", (user_id,))
-            row = c.fetchone()
-            if row and row['is_super_admin']:
-                return False # Cannot remove admin from super admin
+    user = get_doc('users', user_id)
+    if not user:
+        return False
+    
+    # Prevent demoting super admin
+    if not is_admin and user.get('is_super_admin'):
+        return False
+    
+    return update_doc('users', user_id, {'is_admin': is_admin})
 
-        c.execute("UPDATE users SET is_admin = ? WHERE user_id = ?", (1 if is_admin else 0, user_id))
-        conn.commit()
-        return True
-    finally:
-        conn.close()
 
 def make_super_admin(user_id, is_super=True):
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        # Also set is_admin = 1 if making super admin
-        if is_super:
-            c.execute("UPDATE users SET is_super_admin = 1, is_admin = 1 WHERE user_id = ?", (user_id,))
-        else:
-            c.execute("UPDATE users SET is_super_admin = 0 WHERE user_id = ?", (user_id,))
-        conn.commit()
-    finally:
-        conn.close()
+    user = get_doc('users', user_id)
+    if not user:
+        return False
+    
+    updates = {'is_super_admin': is_super}
+    if is_super:
+        updates['is_admin'] = True
+    
+    return update_doc('users', user_id, updates)
+
 
 def remove_user(user_id):
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute("SELECT is_super_admin FROM users WHERE user_id = ?", (user_id,))
-        row = c.fetchone()
-        if row and row['is_super_admin']:
-            return False # Cannot delete super admin
-            
-        c.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
-        conn.commit()
-        return True
-    finally:
-        conn.close()
+    user = get_doc('users', user_id)
+    if user and user.get('is_super_admin'):
+        return False  # Cannot delete super admin
+    
+    return delete_doc('users', user_id)
+
 
 def get_users():
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute("SELECT * FROM users")
-        return [dict(row) for row in c.fetchall()]
-    finally:
-        conn.close()
+    return get_all_docs('users')
+
 
 def is_user_authorized(user_id):
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,))
-        return c.fetchone() is not None
-    finally:
-        conn.close()
+    return get_doc('users', user_id) is not None
+
 
 def is_user_admin(user_id):
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute("SELECT is_admin FROM users WHERE user_id = ?", (user_id,))
-        row = c.fetchone()
-        return row is not None and row['is_admin'] == 1
-    finally:
-        conn.close()
+    user = get_doc('users', user_id)
+    return user is not None and user.get('is_admin', False)
+
 
 def is_user_super_admin(user_id):
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute("SELECT is_super_admin FROM users WHERE user_id = ?", (user_id,))
-        row = c.fetchone()
-        return row is not None and row['is_super_admin'] == 1
-    finally:
-        conn.close()
+    user = get_doc('users', user_id)
+    return user is not None and user.get('is_super_admin', False)
+
+
+# ============================================================================
+# CONFIG FUNCTIONS
+# ============================================================================
 
 def set_config(key, value):
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", (key, value))
-        conn.commit()
-    finally:
-        conn.close()
+    set_doc('config', key, {'value': value})
+
 
 def get_config(key, default=None):
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute("SELECT value FROM config WHERE key = ?", (key,))
-        row = c.fetchone()
-        return row['value'] if row else default
-    finally:
-        conn.close()
+    doc = get_doc('config', key)
+    return doc.get('value', default) if doc else default
+
+
+# ============================================================================
+# INVITE FUNCTIONS
+# ============================================================================
 
 def create_invite(is_admin_invite=False):
-    conn = get_connection()
-    c = conn.cursor()
-    code = secrets.token_hex(4) # 8 chars
-    try:
-        c.execute("INSERT INTO invites (code, is_admin_invite) VALUES (?, ?)", (code, 1 if is_admin_invite else 0))
-        conn.commit()
-        return code
-    finally:
-        conn.close()
+    code = secrets.token_hex(4)  # 8 chars
+    set_doc('invites', code, {'is_admin_invite': is_admin_invite})
+    return code
+
 
 def use_invite(code):
     conn = get_connection()
     c = conn.cursor()
     try:
-        # Check if invite exists and is within 1 hour validity
-        c.execute("""
-            SELECT is_admin_invite 
-            FROM invites 
-            WHERE code = ? 
-            AND datetime(created_at) > datetime('now', '-1 hour')
-        """, (code,))
+        # Get invite if exists and not expired (within 1 hour)
+        c.execute('''
+            SELECT data, created_at FROM documents 
+            WHERE collection = 'invites' AND doc_key = ?
+        ''', (code,))
         row = c.fetchone()
         
-        # If no row found, it might be invalid or expired.
-        # Let's clean up expired invites while we are here to keep DB clean
-        c.execute("DELETE FROM invites WHERE datetime(created_at) <= datetime('now', '-1 hour')")
+        # Clean up expired invites
+        c.execute('''
+            DELETE FROM documents 
+            WHERE collection = 'invites' 
+            AND datetime(created_at) <= datetime('now', '-1 hour')
+        ''')
         conn.commit()
         
         if not row:
             return None
-            
-        is_admin = row['is_admin_invite'] == 1
+        
+        # Check if expired
+        created_at = datetime.fromisoformat(row['created_at'].replace(' ', 'T'))
+        if datetime.now() - created_at > timedelta(hours=1):
+            delete_doc('invites', code)
+            return None
+        
+        data = json.loads(row['data'])
+        is_admin = data.get('is_admin_invite', False)
         
         # Consume the invite
-        c.execute("DELETE FROM invites WHERE code = ?", (code,))
-        conn.commit()
+        delete_doc('invites', code)
         
         return {"success": True, "is_admin": is_admin}
     finally:
         conn.close()
 
-# Initialize DB on module load (or call it explicitly in main)
+
+# Initialize DB on module load
 init_db()
