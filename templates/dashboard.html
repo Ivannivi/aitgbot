@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Bot Dashboard</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }
+        .section { background: #f9f9f9; padding: 15px; border-radius: 5px; margin-bottom: 20px; border: 1px solid #ddd; }
+        h2 { margin-top: 0; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 8px; border-bottom: 1px solid #ddd; text-align: left; }
+        input, select, textarea { width: 100%; padding: 8px; margin: 5px 0; box-sizing: border-box; }
+        button { padding: 8px 15px; background: #28a745; color: white; border: none; cursor: pointer; border-radius: 4px;}
+        .delete-btn { background: #dc3545; }
+        .super-btn { background: #ffc107; color: black; }
+        .logout { float: right; }
+    </style>
+</head>
+<body>
+    <div style="overflow: hidden;">
+        <h1 style="float: left;">Bot Dashboard</h1>
+        <a href="/logout" class="logout"><button style="background: #6c757d;">Logout</button></a>
+    </div>
+
+    <div class="section">
+        <h2>Configuration</h2>
+        <form method="post" action="/update_config">
+            <label><strong>Bot Access Password:</strong></label>
+            <input type="text" name="access_password" value="{{ access_password }}" required>
+
+            <label><strong>LM Studio URL:</strong></label>
+            <input type="text" name="lm_studio_url" value="{{ lm_studio_url }}" required>
+            
+            <label><strong>Current Model (LM Studio):</strong></label>
+            <a href="/dashboard" style="text-decoration: none;"><button type="button" style="padding: 2px 5px; font-size: 0.8em; background: #17a2b8;">Refresh Models</button></a>
+            <select name="model">
+                {% for m in models %}
+                <option value="{{ m.id }}" {% if m.id == current_model %}selected{% endif %}>{{ m.id }}</option>
+                {% endfor %}
+                <option value="{{ current_model }}" {% if not current_model in models|map(attribute='id') %}selected{% endif %}>{{ current_model }} (Not in list)</option>
+            </select>
+            <small>Fetching from http://localhost:1234/v1/models</small>
+            
+            <label><strong>System Prompt:</strong></label>
+            <textarea name="system_prompt" rows="4">{{ system_prompt }}</textarea>
+            
+            <button type="submit" style="margin-top: 10px;">Save Settings</button>
+        </form>
+    </div>
+
+    <div class="section">
+        <h2>Authorized Users</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>User ID</th>
+                    <th>Username</th>
+                    <th>Role</th>
+                    <th>Authorized At</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user in users %}
+                <tr>
+                    <td>{{ user.user_id }}</td>
+                    <td>{{ user.username }}</td>
+                    <td>
+                        {% if user.is_super_admin %}<strong>Super Admin</strong>{% elif user.is_admin %}Admin{% else %}User{% endif %}
+                    </td>
+                    <td>{{ user.authorized_at }}</td>
+                    <td>
+                        <form method="post" action="/delete_user" style="display:inline;">
+                            <input type="hidden" name="user_id" value="{{ user.user_id }}">
+                            <button type="submit" class="delete-btn">Remove</button>
+                        </form>
+                        <form method="post" action="/toggle_super_admin" style="display:inline;">
+                            <input type="hidden" name="user_id" value="{{ user.user_id }}">
+                            <input type="hidden" name="is_super" value="{{ '0' if user.is_super_admin else '1' }}">
+                            <button type="submit" class="super-btn">
+                                {% if user.is_super_admin %}Demote Super{% else %}Make Super{% endif %}
+                            </button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        
+        <h3>Manually Add User</h3>
+        <form method="post" action="/add_user">
+            <input type="number" name="user_id" placeholder="Telegram User ID" required style="width: 200px;">
+            <input type="text" name="username" placeholder="Username (optional)" style="width: 200px;">
+            <button type="submit">Add</button>
+        </form>
+    </div>
+</body>
+</html>
